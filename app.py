@@ -1,7 +1,6 @@
 import streamlit as st
 import requests
 from google import genai
-from google.genai import types
 from PIL import Image
 import json
 import io
@@ -47,10 +46,6 @@ if image_input:
             with st.spinner("AIが伝票を解析中..."):
                 try:
                     client = genai.Client(api_key=GEMINI_API_KEY)
-                    
-                    img_byte_arr = io.BytesIO()
-                    image.save(img_byte_arr, format='JPEG')
-                    image_bytes = img_byte_arr.getvalue()
 
                     prompt = """
                     この伝票・領収書の画像から以下の項目を読み取り、JSONフォーマットのみで返してください。
@@ -66,11 +61,11 @@ if image_input:
                     読み取れない項目は空文字 "" にしてください。JSON以外の解説文は出力しないでください。
                     """
 
-                    # 最新SDK推奨モデル名（gemini-2.0-flash）に変更
+                    # 新SDK（google-genai）では PIL Image オブジェクトとテキストを直接渡せます
                     response = client.models.generate_content(
-    model='models/gemini-1.5-flash',
-    contents=[ ... ]
-)
+                        model='gemini-2.5-flash',
+                        contents=[image, prompt]
+                    )
 
                     raw_text = response.text.strip()
                     if "```" in raw_text:

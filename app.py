@@ -3,7 +3,6 @@ import requests
 from google import genai
 from PIL import Image
 import json
-import io
 import datetime
 
 # ページ設定
@@ -45,6 +44,7 @@ if image_input:
         else:
             with st.spinner("AIが伝票を解析中..."):
                 try:
+                    # クライアント初期化
                     client = genai.Client(api_key=GEMINI_API_KEY)
 
                     prompt = """
@@ -61,9 +61,9 @@ if image_input:
                     読み取れない項目は空文字 "" にしてください。JSON以外の解説文は出力しないでください。
                     """
 
-                    # 最新・安定モデル gemini-2.0-flash を使用
+                    # 現在最も安定して動作する gemini-2.0-flash を指定
                     response = client.models.generate_content(
-                        model='gemini-2.5-flash',
+                        model='gemini-2.0-flash',
                         contents=[image, prompt]
                     )
 

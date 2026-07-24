@@ -61,9 +61,9 @@ if image_input:
                     読み取れない項目は空文字 "" にしてください。JSON以外の解説文は出力しないでください。
                     """
 
-                    # 現在最も安定して動作する gemini-2.0-flash を指定
+                    # 無料枠の制限を回避するため gemini-2.0-flash-lite を指定
                     response = client.models.generate_content(
-                        model='gemini-2.0-flash',
+                        model='gemini-2.0-flash-lite',
                         contents=[image, prompt]
                     )
 

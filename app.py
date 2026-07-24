@@ -63,7 +63,7 @@ if image_input:
 
                     # 最新・安定モデル gemini-2.0-flash を使用
                     response = client.models.generate_content(
-                        model='gemini-1.5-flash',
+                        model='gemini-2.5-flash',
                         contents=[image, prompt]
                     )
 

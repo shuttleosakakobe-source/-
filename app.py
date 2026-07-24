@@ -66,9 +66,9 @@ if image_input:
                     読み取れない項目は空文字 "" にしてください。JSON以外の解説文は出力しないでください。
                     """
 
-                    # 最新のモデル名指定（gemini-1.5-flash）
+                    # 最新SDK推奨モデル名（gemini-2.0-flash）に変更
                     response = client.models.generate_content(
-                        model='gemini-1.5-flash',
+                        model='gemini-2.0-flash',
                         contents=[
                             types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
                             prompt

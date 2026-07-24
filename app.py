@@ -33,14 +33,15 @@ with tab2:
         image_input = uploaded_file
 
 image_base64 = None
-mime_type = "image/jpeg"
 
 if image_input:
     image = Image.open(image_input)
     st.image(image, caption="撮影した画像", use_container_width=True)
 
-    # 画像をBase64形式に変換
+    # 画像を明確にJPEG形式としてBase64変換
     buffered = io.BytesIO()
+    if image.mode != "RGB":
+        image = image.convert("RGB")
     image.save(buffered, format="JPEG")
     image_base64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
@@ -76,8 +77,7 @@ if submit_btn:
                 "phone": phone,
                 "address": address,
                 "content": content,
-                "image_base64": image_base64,
-                "mime_type": mime_type
+                "image_base64": image_base64
             }
             try:
                 res = requests.post(GAS_URL, json=payload, timeout=30)
@@ -90,6 +90,6 @@ if submit_btn:
                     else:
                         st.error(f"保存失敗: {res_data.get('message')}")
                 except Exception:
-                    st.error(f"GASからの応答がエラーです。Drive APIの追加と『全員』での再デプロイを確認してください。\n\n**GASレスポンス内訳:**\n{res.text[:300]}")
+                    st.error(f"GASからの応答がエラーです:\n\n{res.text[:300]}")
             except Exception as e:
                 st.error(f"送信エラー: {e}")

@@ -61,9 +61,9 @@ if image_input:
                     読み取れない項目は空文字 "" にしてください。JSON以外の解説文は出力しないでください。
                     """
 
-                    # 新SDK（google-genai）では PIL Image オブジェクトとテキストを直接渡せます
+                    # 最新・安定モデル gemini-2.0-flash を使用
                     response = client.models.generate_content(
-                        model='gemini-2.5-flash',
+                        model='gemini-2.0-flash',
                         contents=[image, prompt]
                     )
 

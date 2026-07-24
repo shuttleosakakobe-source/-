@@ -44,9 +44,11 @@ if image_input:
         else:
             with st.spinner("AIが伝票を解析中..."):
                 try:
-                    # 旧SDKのAPIキー設定
+                    # APIキー設定
                     genai.configure(api_key=GEMINI_API_KEY)
-                    model = genai.GenerativeModel('gemini-1.5-flash')
+                    
+                    # 互換性の高い latest 指定に変更
+                    model = genai.GenerativeModel('gemini-1.5-flash-latest')
 
                     prompt = """
                     この伝票・領収書の画像から以下の項目を読み取り、JSONフォーマットのみで返してください。

@@ -1,22 +1,21 @@
 import streamlit as st
 import requests
-import google.generativeai as genai
 from PIL import Image
-import json
+import io
+import base64
 import datetime
 
 # ページ設定
-st.set_page_config(page_title="伝票読み取りアプリ", page_icon="🧾", layout="centered")
+st.set_page_config(page_title="伝票読み取り＆保存アプリ", page_icon="🧾", layout="centered")
 
-st.title("🧾 伝票読み取り＆自動保存")
-st.caption("伝票を撮影するとAIが内容を自動抽出して保存します。")
+st.title("🧾 伝票読み取り＆自動保存（無料版）")
+st.caption("Google Driveの無料OCR機能を使って伝票を読み取り、スプレッドシートに保存します。")
 
 # 設定情報の読み込み（Streamlit Cloud の Secrets から取得）
-GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 GAS_URL = st.secrets.get("GAS_URL", "")
 
-if "ocr_result" not in st.session_state:
-    st.session_state.ocr_result = {}
+if "ocr_text" not in st.session_state:
+    st.session_state.ocr_text = ""
 
 # 1. スマホカメラ撮影 / ファイル選択
 st.markdown("### 1. 伝票の撮影・アップロード")
@@ -33,97 +32,62 @@ with tab2:
     if uploaded_file:
         image_input = uploaded_file
 
-# 画像読み取り処理
+image_base64 = None
+mime_type = "image/jpeg"
+
 if image_input:
     image = Image.open(image_input)
     st.image(image, caption="撮影した画像", use_container_width=True)
 
-    if st.button("🔍 AIで伝票を自動読み取り", type="primary", use_container_width=True):
-        if not GEMINI_API_KEY:
-            st.error("Gemini API Key が設定されていません。Streamlit Cloudの Secrets を確認してください。")
-        else:
-            with st.spinner("AIが伝票を解析中..."):
-                try:
-                    # APIキー設定
-                    genai.configure(api_key=GEMINI_API_KEY)
-                    
-                    # 互換性の高い latest 指定に変更
-                    model = genai.GenerativeModel('gemini-1.5-flash-latest')
-
-                    prompt = """
-                    この伝票・領収書の画像から以下の項目を読み取り、JSONフォーマットのみで返してください。
-                    キー名は以下に統一してください:
-                    - customer_name: お客様名・宛名
-                    - branch_name: 加盟店名・店舗名
-                    - amount: 金額（数値のみ）
-                    - date: 日付（YYYY-MM-DD形式。不明なら空欄）
-                    - phone: 電話番号
-                    - address: 住所
-                    - content: 品名・作業詳細
-                    
-                    読み取れない項目は空文字 "" にしてください。JSON以外の解説文は出力しないでください。
-                    """
-
-                    response = model.generate_content([image, prompt])
-
-                    raw_text = response.text.strip()
-                    if "```" in raw_text:
-                        raw_text = raw_text.split("```")[1]
-                        if raw_text.startswith("json"):
-                            raw_text = raw_text[4:]
-                    
-                    parsed_data = json.loads(raw_text.strip())
-                    st.session_state.ocr_result = parsed_data
-                    st.success("✨ 読み取り完了！下のフォームを確認してください。")
-
-                except Exception as e:
-                    st.error(f"読み取りエラー: {e}")
+    # 画像をBase64形式に変換
+    buffered = io.BytesIO()
+    image.save(buffered, format="JPEG")
+    image_base64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
 st.markdown("---")
 
-# 2. データの確認・手修正フォーム
+# 2. 内容入力・送信フォーム
 st.markdown("### 2. 内容確認・送信")
-ocr = st.session_state.ocr_result
 
 with st.form(key="receipt_form"):
-    parsed_date_str = ocr.get("date", "")
-    default_date = datetime.date.today()
-    if parsed_date_str:
-        try:
-            default_date = datetime.datetime.strptime(parsed_date_str, "%Y-%m-%d").date()
-        except:
-            pass
+    report_date = st.date_input("日付", value=datetime.date.today())
+    customer_name = st.text_input("お客様名")
+    branch_name = st.text_input("加盟店名/店舗名")
+    amount = st.text_input("金額（数字のみ）")
+    phone = st.text_input("電話番号")
+    address = st.text_input("住所")
+    content = st.text_area("詳細・メモ", value=st.session_state.ocr_text)
 
-    report_date = st.date_input("日付", value=default_date)
-    customer_name = st.text_input("お客様名", value=ocr.get("customer_name", ""))
-    branch_name = st.text_input("加盟店名/店舗名", value=ocr.get("branch_name", ""))
-    amount = st.text_input("金額", value=str(ocr.get("amount", "")))
-    phone = st.text_input("電話番号", value=ocr.get("phone", ""))
-    address = st.text_input("住所", value=ocr.get("address", ""))
-    content = st.text_area("詳細内容", value=ocr.get("content", ""))
+    submit_btn = st.form_submit_button("🚀 画像を解析してスプレッドシートに保存", type="primary", use_container_width=True)
 
-    submit_btn = st.form_submit_button("💾 スプレッドシートに保存", type="primary", use_container_width=True)
-
-# 3. GASへ送信
+# 3. GASへ送信処理
 if submit_btn:
     if not GAS_URL:
-        st.error("GAS WebApp URL が設定されていません。Streamlit Cloudの Secrets を確認してください。")
-    elif not customer_name:
-        st.warning("お客様名を入力してください。")
+        st.error("GAS WebApp URL が設定されていません。Streamlit Secretsを確認してください。")
+    elif not image_base64 and not customer_name:
+        st.warning("画像を選択するか、お客様名を入力してください。")
     else:
-        with st.spinner("スプレッドシートへ保存中..."):
+        with st.spinner("Google Driveの無料OCRで解析＆スプレッドシートへ保存中..."):
             payload = {
-                "card_type": "伝票読取",
                 "report_date": str(report_date),
                 "customer_name": customer_name,
                 "branch_name": branch_name,
                 "amount": amount,
                 "phone": phone,
                 "address": address,
-                "content": content
+                "content": content,
+                "image_base64": image_base64,
+                "mime_type": mime_type
             }
             try:
-                res = requests.post(GAS_URL, json=payload, timeout=15)
-                st.success("🎉 スプレッドシートに正常保存されました！")
+                res = requests.post(GAS_URL, json=payload, timeout=30)
+                res_data = res.json()
+                
+                if res_data.get("status") == "success":
+                    st.success("🎉 スプレッドシートに正常保存されました！")
+                    if res_data.get("extracted_text"):
+                        st.info("📄 **読み取られたテキスト:**\n\n" + res_data.get("extracted_text"))
+                else:
+                    st.error(f"保存失敗: {res_data.get('message')}")
             except Exception as e:
                 st.error(f"送信エラー: {e}")

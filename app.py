@@ -7,6 +7,7 @@ import json
 import io
 import datetime
 
+# ページ設定
 st.set_page_config(page_title="伝票読み取りアプリ", page_icon="🧾", layout="centered")
 
 st.title("🧾 伝票読み取り＆自動保存")
@@ -65,8 +66,9 @@ if image_input:
                     読み取れない項目は空文字 "" にしてください。JSON以外の解説文は出力しないでください。
                     """
 
+                    # 最新のモデル名指定（gemini-1.5-flash）
                     response = client.models.generate_content(
-                        model='gemini-2.5-flash',
+                        model='gemini-1.5-flash',
                         contents=[
                             types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
                             prompt

@@ -1,3 +1,4 @@
 streamlit
-requests
+gspread
+google-auth
 Pillow

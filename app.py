@@ -1,46 +1,83 @@
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 from datetime import datetime
+import io
 
 # --- ページ基本設定 ---
 st.set_page_config(page_title="ミスユーズ登録アプリ", layout="centered")
 st.title("📋 ミスユーズ登録アプリ")
 
-# --- Google スプレッドシート接続設定 ---
+# --- Google 設定 ---
 SPREADSHEET_KEY = "1A3_0mGiO1FRz4cVHjpxzd66jFKDcyJ-oUPCH3OtSooE"
+
+# 共有いただいたGoogleドライブのフォルダID
+DRIVE_FOLDER_ID = "1eg4vR-8v0qNpWKjEYvQ-2IDMK9O52DhU" 
+
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
 ]
 
 @st.cache_resource
-def get_gspread_client():
-    # Secretsから辞書データとして取得
+def get_gcp_services():
     creds_dict = dict(st.secrets["gcp_service_account"])
     
-    # 秘密鍵（private_key）の改行コード整形処理
     if "private_key" in creds_dict:
         pk = str(creds_dict["private_key"])
-        # エスケープされた \n を実際の改行に変換
         pk = pk.replace("\\n", "\n")
-        # 万が一改行が欠落している場合に対応
         if "-----BEGIN PRIVATE KEY-----" in pk and "\n" not in pk:
             pk = pk.replace("-----BEGIN PRIVATE KEY-----", "-----BEGIN PRIVATE KEY-----\n")
             pk = pk.replace("-----END PRIVATE KEY-----", "\n-----END PRIVATE KEY-----")
         creds_dict["private_key"] = pk
 
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-    client = gspread.authorize(creds)
-    return client
+    
+    gc = gspread.authorize(creds)
+    drive_service = build('drive', 'v3', credentials=creds)
+    
+    return gc, drive_service
+
+def upload_photo_to_drive(drive_service, uploaded_file, folder_id):
+    """指定のGoogleドライブフォルダに画像を保存し、スプレッドシート用直リンクURLを返す"""
+    file_metadata = {
+        'name': f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uploaded_file.name}",
+        'parents': [folder_id]
+    }
+    
+    media = MediaIoBaseUpload(
+        io.BytesIO(uploaded_file.getvalue()),
+        mimetype=uploaded_file.type,
+        resumable=True
+    )
+    
+    file = drive_service.files().create(
+        body=file_metadata,
+        media_body=media,
+        fields='id, webViewLink'
+    ).execute()
+    
+    file_id = file.get('id')
+    
+    # スプレッドシートの =IMAGE 関数で表示できるようにリンク閲覧権限を付与
+    drive_service.permissions().create(
+        fileId=file_id,
+        body={'type': 'anyone', 'role': 'reader'}
+    ).execute()
+    
+    # 画像の直リンクURLを返却
+    direct_url = f"https://drive.google.com/uc?export=view&id={file_id}"
+    return direct_url
 
 try:
-    gc = get_gspread_client()
+    gc, drive_service = get_gcp_services()
     sh = gc.open_by_key(SPREADSHEET_KEY)
     contract_sheet = sh.worksheet("契約データ")
     target_sheet = sh.worksheet("ミスユーズ(神戸)")
 except Exception as e:
-    st.error(f"スプレッドシートへの接続エラー: {e}")
+    st.error(f"接続エラー: {e}")
     st.stop()
 
 # --- session_state (状態保持) の初期化 ---
@@ -63,7 +100,7 @@ with col_input:
     )
 
 with col_btn:
-    st.write(" ") # レイアウト調整用スペース
+    st.write(" ")
     search_clicked = st.button("🔍 検索", use_container_width=True)
 
 if search_clicked and input_code.strip():
@@ -77,7 +114,6 @@ if search_clicked and input_code.strip():
             header = all_rows[0]
             data_rows = all_rows[1:]
             
-            # A列(顧客コード)で一致する全行を抽出
             matches = []
             for row in data_rows:
                 if len(row) >= 5:
@@ -86,11 +122,11 @@ if search_clicked and input_code.strip():
                     
                     if row_code_clean == target_code_clean:
                         matches.append({
-                            "code": row[0].strip(),        # A列: 顧客コード
-                            "name": row[1].strip(),        # B列: 顧客名
-                            "branch_code": row[2].strip(), # C列: 加盟店コード
-                            "branch_name": row[3].strip(), # D列: 加盟店名
-                            "product_code": row[4].strip() # E列: 商品記号
+                            "code": row[0].strip(),
+                            "name": row[1].strip(),
+                            "branch_code": row[2].strip(),
+                            "branch_name": row[3].strip(),
+                            "product_code": row[4].strip()
                         })
             
             st.session_state.search_results = matches
@@ -109,16 +145,13 @@ if st.session_state.search_results is not None:
     else:
         st.success(f"✅ {len(results)} 件の契約データが見つかりました！")
         
-        # 共通情報の取得（最初の一致行から取得）
         customer_code = results[0]["code"]
         customer_name = results[0]["name"]
         branch_code = results[0]["branch_code"]
         branch_name = results[0]["branch_name"]
         
-        # 一致する全ての商品記号リスト（重複排除）
         all_product_codes = sorted(list(set([r["product_code"] for r in results if r["product_code"]])))
         
-        # --- 基本情報カード表示 ---
         st.markdown("##### 📌 顧客・加盟店情報")
         col_a, col_b = st.columns(2)
         with col_a:
@@ -129,27 +162,20 @@ if st.session_state.search_results is not None:
         st.subheader("2. 詳細入力")
         with st.form("data_entry_form", clear_on_submit=False):
             
-            # --- 商品記号の複数選択 ---
-            st.write("**商品記号を選択（複数選択可）**")
             selected_products = st.multiselect(
                 "対象の商品記号を選択してください",
                 options=all_product_codes,
                 default=all_product_codes
             )
             
-            # --- 区分（ラジオボタン ＋ その他記述） ---
-            st.write("**区分を選択**")
             category_option = st.radio(
                 "区分",
                 options=["キリコ", "毛髪", "オイル", "その他"],
                 horizontal=True
             )
             
-            # 「その他」が選ばれた場合のみテキスト入力欄を表示
             other_text = st.text_input("「その他」を選択した場合の詳細")
             
-            # --- 写真の添付 ---
-            st.write("**写真の添付**")
             uploaded_photo = st.file_uploader("写真を添付してください（任意）", type=["jpg", "jpeg", "png"])
             if uploaded_photo is not None:
                 st.image(uploaded_photo, caption="添付画像プレビュー", width=200)
@@ -157,18 +183,27 @@ if st.session_state.search_results is not None:
             st.write("")
             submit_button = st.form_submit_button("🚀 「ミスユーズ(神戸)」シートに送信・保存", use_container_width=True)
 
-        # --- 送信処理 ---
         if submit_button:
             if not selected_products:
                 st.error("商品記号を1つ以上選択してください。")
             else:
                 final_category = f"その他（{other_text}）" if category_option == "その他" and other_text else category_option
                 
-                with st.spinner("スプレッドシートへ保存中..."):
+                with st.spinner("写真のアップロードとスプレッドシートへの保存処理中..."):
                     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    photo_name = uploaded_photo.name if uploaded_photo else "写真なし"
                     
-                    # 選択された商品記号ごとに1行ずつデータを生成
+                    # 画像アップロード処理
+                    photo_val = "写真なし"
+                    if uploaded_photo is not None:
+                        try:
+                            # Googleドライブのフォルダへ保存してURL取得
+                            photo_url = upload_photo_to_drive(drive_service, uploaded_photo, DRIVE_FOLDER_ID)
+                            # スプレッドシート内で画像表示させる数式
+                            photo_val = f'=IMAGE("{photo_url}")'
+                        except Exception as upload_err:
+                            st.error(f"写真のアップロードに失敗しました。フォルダの共有設定を確認してください: {upload_err}")
+                            photo_val = "アップロード失敗"
+                    
                     new_rows = []
                     for prod in selected_products:
                         row = [
@@ -177,14 +212,14 @@ if st.session_state.search_results is not None:
                             customer_name,   # C列: 顧客名
                             branch_code,     # D列: 加盟店コード
                             branch_name,     # E列: 加盟店名
-                            prod,            # F列: 商品記号（1行に1つ）
+                            prod,            # F列: 商品記号
                             final_category,  # G列: 区分
-                            photo_name       # H列: 写真（ファイル名）
+                            photo_val        # H列: 写真（セル内に画像が表示されます）
                         ]
                         new_rows.append(row)
                     
-                    # 「ミスユーズ(神戸)」シートへ末尾一括追加
-                    target_sheet.append_rows(new_rows)
+                    # 数式（=IMAGE）をそのまま評価させるオプションを指定
+                    target_sheet.append_rows(new_rows, value_input_option="USER_ENTERED")
                     
-                    st.success(f"🎉 正常に保存されました！（計 {len(new_rows)} 行のデータを作成）")
+                    st.success(f"🎉 正常に保存されました！（指定ドライブに保存＆スプレッドシートに反映完了）")
                     st.balloons()

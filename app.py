@@ -1,20 +1,16 @@
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
+import requests
+import base64
 from datetime import datetime
-import io
 
 # --- ページ基本設定 ---
 st.set_page_config(page_title="ミスユーズ登録アプリ", layout="centered")
 st.title("📋 ミスユーズ登録アプリ")
 
-# --- Google 設定 ---
+# --- Google スプレッドシート設定 ---
 SPREADSHEET_KEY = "1A3_0mGiO1FRz4cVHjpxzd66jFKDcyJ-oUPCH3OtSooE"
-
-# 指定されたGoogleドライブのフォルダID
-DRIVE_FOLDER_ID = "1eg4vR-8v0qNpWKjEYvQ-2IDMK9O52DhU" 
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -22,7 +18,7 @@ SCOPES = [
 ]
 
 @st.cache_resource
-def get_gcp_services():
+def get_gspread_client():
     creds_dict = dict(st.secrets["gcp_service_account"])
     
     if "private_key" in creds_dict:
@@ -34,56 +30,38 @@ def get_gcp_services():
         creds_dict["private_key"] = pk
 
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-    
-    gc = gspread.authorize(creds)
-    drive_service = build('drive', 'v3', credentials=creds)
-    
-    return gc, drive_service
+    client = gspread.authorize(creds)
+    return client
 
-def upload_photo_to_drive(drive_service, uploaded_file, folder_id):
-    """指定のGoogleドライブフォルダに画像を保存し、スプレッドシート用直リンクURLを返す"""
-    file_metadata = {
-        'name': f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uploaded_file.name}",
-        'parents': [folder_id]
+def upload_photo_to_imgur(uploaded_file):
+    """Imgurに画像をアップロードして直リンクURLを取得する"""
+    # 匿名アップロード用ClientID（パブリック用）
+    CLIENT_ID = "9336496ec2b34a2"
+    
+    headers = {"Authorization": f"Client-ID {CLIENT_ID}"}
+    image_bytes = uploaded_file.getvalue()
+    base64_image = base64.b64encode(image_bytes)
+    
+    payload = {
+        'image': base64_image,
+        'type': 'base64'
     }
     
-    media = MediaIoBaseUpload(
-        io.BytesIO(uploaded_file.getvalue()),
-        mimetype=uploaded_file.type,
-        resumable=True
-    )
+    res = requests.post("https://api.imgur.com/3/image", headers=headers, data=payload)
     
-    # supportsAllDrives=True を追加して共有フォルダ/ドライブへのアップロードエラーを防止
-    file = drive_service.files().create(
-        body=file_metadata,
-        media_body=media,
-        fields='id, webViewLink',
-        supportsAllDrives=True
-    ).execute()
-    
-    file_id = file.get('id')
-    
-    # 閲覧権限の付与（＝IMAGE関数でスプレッドシート上に読み込ませるため）
-    try:
-        drive_service.permissions().create(
-            fileId=file_id,
-            body={'type': 'anyone', 'role': 'reader'},
-            supportsAllDrives=True
-        ).execute()
-    except Exception:
-        pass
-    
-    # 画像の直リンクURLを返却
-    direct_url = f"https://drive.google.com/uc?export=view&id={file_id}"
-    return direct_url
+    if res.status_code == 200:
+        data = res.json()
+        return data['data']['link']
+    else:
+        raise Exception(f"Imgurエラー: {res.text}")
 
 try:
-    gc, drive_service = get_gcp_services()
+    gc = get_gspread_client()
     sh = gc.open_by_key(SPREADSHEET_KEY)
     contract_sheet = sh.worksheet("契約データ")
     target_sheet = sh.worksheet("ミスユーズ(神戸)")
 except Exception as e:
-    st.error(f"接続エラー: {e}")
+    st.error(f"スプレッドシート接続エラー: {e}")
     st.stop()
 
 # --- session_state (状態保持) の初期化 ---
@@ -195,19 +173,19 @@ if st.session_state.search_results is not None:
             else:
                 final_category = f"その他（{other_text}）" if category_option == "その他" and other_text else category_option
                 
-                with st.spinner("写真のアップロードとスプレッドシートへの保存処理中..."):
+                with st.spinner("写真のアップロードと保存処理中..."):
                     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     
                     # 画像アップロード処理
                     photo_val = "写真なし"
                     if uploaded_photo is not None:
                         try:
-                            # Googleドライブのフォルダへ保存してURL取得
-                            photo_url = upload_photo_to_drive(drive_service, uploaded_photo, DRIVE_FOLDER_ID)
-                            # スプレッドシート内で画像表示させる数式
+                            # 画像をアップロードして直接表示可能なURLを取得
+                            photo_url = upload_photo_to_imgur(uploaded_photo)
+                            # スプレッドシート内で直接画像表示させる数式
                             photo_val = f'=IMAGE("{photo_url}")'
                         except Exception as upload_err:
-                            st.error(f"写真のアップロードに失敗しました: {upload_err}")
+                            st.error(f"写真の保存に失敗しました: {upload_err}")
                             photo_val = "アップロード失敗"
                     
                     new_rows = []
@@ -220,12 +198,12 @@ if st.session_state.search_results is not None:
                             branch_name,     # E列: 加盟店名
                             prod,            # F列: 商品記号
                             final_category,  # G列: 区分
-                            photo_val        # H列: 写真（セル内に画像が表示されます）
+                            photo_val        # H列: 写真 (=IMAGE("URL") で表示)
                         ]
                         new_rows.append(row)
                     
-                    # 数式（=IMAGE）を評価させるため USER_ENTERED を指定
+                    # スプレッドシートに追記 (=IMAGE数式を評価)
                     target_sheet.append_rows(new_rows, value_input_option="USER_ENTERED")
                     
-                    st.success(f"🎉 正常に保存されました！")
+                    st.success(f"🎉 正常に保存されました！（スプレッドシートに写真が表示されます）")
                     st.balloons()

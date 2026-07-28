@@ -18,6 +18,11 @@ SCOPES = [
 def get_gspread_client():
     # Secrets の [gcp_service_account] から認証情報を取り出し
     creds_dict = dict(st.secrets["gcp_service_account"])
+    
+    # \n 文字列が含まれる場合に備えて自動補正
+    if "private_key" in creds_dict:
+        creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+        
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     client = gspread.authorize(creds)
     return client

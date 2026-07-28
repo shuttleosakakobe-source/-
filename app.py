@@ -1,7 +1,6 @@
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
-import google.auth.transport.requests
 import requests
 from datetime import datetime
 
@@ -11,7 +10,6 @@ st.title("📋 ミスユーズ登録アプリ")
 
 # --- Google 設定 ---
 SPREADSHEET_KEY = "1A3_0mGiO1FRz4cVHjpxzd66jFKDcyJ-oUPCH3OtSooE"
-DRIVE_FOLDER_ID = "1eg4vR-8v0qNpWKjEYvQ-2IDMK9O52DhU" 
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -32,70 +30,30 @@ def get_credentials():
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     return creds
 
-def upload_photo_to_google_drive(creds, uploaded_file, folder_id):
-    """サービスアカウントのストレージ容量制限を回避して指定フォルダへアップロード"""
-    # アクセストークンの最新化
-    auth_req = google.auth.transport.requests.Request()
-    creds.refresh(auth_req)
-    access_token = creds.token
-    
-    file_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uploaded_file.name}"
-    
-    # 1. アップロードセッションの作成
-    metadata = {
-        'name': file_name,
-        'parents': [folder_id]
+def upload_photo_external(uploaded_file):
+    """外部フリーストレージ(freeimage.host API)へ画像を保存して直リンクURLを取得"""
+    url = "https://freeimage.host/api/1/upload"
+    # freeimage.host パブリックAPIキー
+    params = {
+        "key": "6d207e02198a847aa98d0a2a901485a5",
+        "action": "upload",
+        "format": "json"
+    }
+    files = {
+        "source": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)
     }
     
-    init_headers = {
-        'Authorization': f'Bearer {access_token}',
-        'Content-Type': 'application/json; charset=UTF-8',
-        'X-Upload-Content-Type': uploaded_file.type
-    }
-    
-    init_res = requests.post(
-        'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true',
-        headers=init_headers,
-        json=metadata
-    )
-    
-    if init_res.status_code != 200:
-        raise Exception(f"セッション作成失敗: {init_res.text}")
-        
-    upload_url = init_res.headers.get('Location')
-    
-    # 2. バイナリデータの送信
-    file_bytes = uploaded_file.getvalue()
-    upload_headers = {
-        'Content-Type': uploaded_file.type,
-        'Content-Length': str(len(file_bytes))
-    }
-    
-    upload_res = requests.put(upload_url, headers=upload_headers, data=file_bytes)
-    if upload_res.status_code not in [200, 201]:
-        raise Exception(f"アップロード失敗: {upload_res.text}")
-        
-    file_id = upload_res.json().get('id')
-    
-    # 3. リンクを知っている全員が閲覧できるように権限を設定
-    perm_headers = {
-        'Authorization': f'Bearer {access_token}',
-        'Content-Type': 'application/json'
-    }
-    perm_body = {
-        'role': 'reader',
-        'type': 'anyone'
-    }
-    requests.post(
-        f'https://www.googleapis.com/drive/v3/files/{file_id}/permissions?supportsAllDrives=true',
-        headers=perm_headers,
-        json=perm_body
-    )
-    
-    # スプレッドシート用直リンクURL
-    return f"https://drive.google.com/uc?export=view&id={file_id}"
+    response = requests.post(url, data=params, files=files)
+    if response.status_code == 200:
+        res_data = response.json()
+        if res_data.get("status_code") == 200:
+            return res_data["image"]["url"]
+        else:
+            raise Exception(f"アップロード応答エラー: {res_data}")
+    else:
+        raise Exception(f"HTTPエラー: {response.status_code} - {response.text}")
 
-# アプリ起動時の初期化
+# 初期化処理
 try:
     creds = get_credentials()
     gc = gspread.authorize(creds)
@@ -222,8 +180,8 @@ if st.session_state.search_results is not None:
                     photo_val = "写真なし"
                     if uploaded_photo is not None:
                         try:
-                            # Google Driveフォルダへ保存
-                            photo_url = upload_photo_to_google_drive(creds, uploaded_photo, DRIVE_FOLDER_ID)
+                            # 外部ストレージAPIへ保存して画像直リンクURLを取得
+                            photo_url = upload_photo_external(uploaded_photo)
                             photo_val = f'=IMAGE("{photo_url}")'
                         except Exception as upload_err:
                             st.error(f"写真の保存に失敗しました: {upload_err}")
@@ -245,5 +203,5 @@ if st.session_state.search_results is not None:
                     
                     target_sheet.append_rows(new_rows, value_input_option="USER_ENTERED")
                     
-                    st.success(f"🎉 正常に保存されました！（指定のGoogleドライブに画像が格納され、シートに画像が表示されます）")
+                    st.success(f"🎉 正常に保存されました！（スプレッドシートのH列に画像が表示されます）")
                     st.balloons()

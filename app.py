@@ -16,9 +16,9 @@ SCOPES = [
 
 @st.cache_resource
 def get_gspread_client():
-    # サービスアカウントキー (credentials.json) から認証
-    # Streamlit Cloud等で動かす場合は st.secrets から読み出すことも可能です
-    creds = Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
+    # Secrets の [gcp_service_account] から認証情報を取り出し
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     client = gspread.authorize(creds)
     return client
 
@@ -44,14 +44,18 @@ st.subheader("1. 顧客コード検索")
 col_input, col_btn = st.columns([3, 1])
 
 with col_input:
-    input_code = st.text_input("顧客コードを入力してください", value=st.session_state.searched_code, placeholder="例: 0115923 または 115923")
+    input_code = st.text_input(
+        "顧客コードを入力してください", 
+        value=st.session_state.searched_code, 
+        placeholder="例: 0115923 または 115923"
+    )
 
 with col_btn:
     st.write(" ") # レイアウト調整用スペース
     search_clicked = st.button("🔍 検索", use_container_width=True)
 
 if search_clicked and input_code.strip():
-    # 入力されたコードの先頭ゼロを除去＆文字列化して整形比較できるようにする
+    # 先頭ゼロを除去＆文字列化して整形比較できるようにする
     target_code_clean = input_code.strip().lstrip("0")
     
     with st.spinner("「契約データ」シートを検索中..."):
@@ -114,7 +118,7 @@ if st.session_state.search_results is not None:
             selected_products = st.multiselect(
                 "対象の商品記号を選択してください",
                 options=all_product_codes,
-                default=all_product_codes # デフォルトですべて選択状態にしたい場合は指定
+                default=all_product_codes
             )
             
             # --- 区分（ラジオボタン ＋ その他記述） ---
@@ -166,7 +170,7 @@ if st.session_state.search_results is not None:
                         ]
                         new_rows.append(row)
                     
-                    # 「ミスユーズ(神戸)」シートへ末尾一括追加（append_rows）
+                    # 「ミスユーズ(神戸)」シートへ末尾一括追加
                     target_sheet.append_rows(new_rows)
                     
                     st.success(f"🎉 正常に保存されました！（計 {len(new_rows)} 行のデータを作成）")

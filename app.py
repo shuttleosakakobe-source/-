@@ -1,16 +1,17 @@
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
+import google.auth.transport.requests
 import requests
-import base64
 from datetime import datetime
 
 # --- ページ基本設定 ---
 st.set_page_config(page_title="ミスユーズ登録アプリ", layout="centered")
 st.title("📋 ミスユーズ登録アプリ")
 
-# --- Google スプレッドシート設定 ---
+# --- Google 設定 ---
 SPREADSHEET_KEY = "1A3_0mGiO1FRz4cVHjpxzd66jFKDcyJ-oUPCH3OtSooE"
+DRIVE_FOLDER_ID = "1eg4vR-8v0qNpWKjEYvQ-2IDMK9O52DhU" 
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -18,9 +19,8 @@ SCOPES = [
 ]
 
 @st.cache_resource
-def get_gspread_client():
+def get_credentials():
     creds_dict = dict(st.secrets["gcp_service_account"])
-    
     if "private_key" in creds_dict:
         pk = str(creds_dict["private_key"])
         pk = pk.replace("\\n", "\n")
@@ -30,38 +30,80 @@ def get_gspread_client():
         creds_dict["private_key"] = pk
 
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-    client = gspread.authorize(creds)
-    return client
+    return creds
 
-def upload_photo_to_imgur(uploaded_file):
-    """Imgurに画像をアップロードして直リンクURLを取得する"""
-    # 匿名アップロード用ClientID（パブリック用）
-    CLIENT_ID = "9336496ec2b34a2"
+def upload_photo_to_google_drive(creds, uploaded_file, folder_id):
+    """サービスアカウントのストレージ容量制限を回避して指定フォルダへアップロード"""
+    # アクセストークンの最新化
+    auth_req = google.auth.transport.requests.Request()
+    creds.refresh(auth_req)
+    access_token = creds.token
     
-    headers = {"Authorization": f"Client-ID {CLIENT_ID}"}
-    image_bytes = uploaded_file.getvalue()
-    base64_image = base64.b64encode(image_bytes)
+    file_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uploaded_file.name}"
     
-    payload = {
-        'image': base64_image,
-        'type': 'base64'
+    # 1. アップロードセッションの作成
+    metadata = {
+        'name': file_name,
+        'parents': [folder_id]
     }
     
-    res = requests.post("https://api.imgur.com/3/image", headers=headers, data=payload)
+    init_headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json; charset=UTF-8',
+        'X-Upload-Content-Type': uploaded_file.type
+    }
     
-    if res.status_code == 200:
-        data = res.json()
-        return data['data']['link']
-    else:
-        raise Exception(f"Imgurエラー: {res.text}")
+    init_res = requests.post(
+        'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true',
+        headers=init_headers,
+        json=metadata
+    )
+    
+    if init_res.status_code != 200:
+        raise Exception(f"セッション作成失敗: {init_res.text}")
+        
+    upload_url = init_res.headers.get('Location')
+    
+    # 2. バイナリデータの送信
+    file_bytes = uploaded_file.getvalue()
+    upload_headers = {
+        'Content-Type': uploaded_file.type,
+        'Content-Length': str(len(file_bytes))
+    }
+    
+    upload_res = requests.put(upload_url, headers=upload_headers, data=file_bytes)
+    if upload_res.status_code not in [200, 201]:
+        raise Exception(f"アップロード失敗: {upload_res.text}")
+        
+    file_id = upload_res.json().get('id')
+    
+    # 3. リンクを知っている全員が閲覧できるように権限を設定
+    perm_headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+    perm_body = {
+        'role': 'reader',
+        'type': 'anyone'
+    }
+    requests.post(
+        f'https://www.googleapis.com/drive/v3/files/{file_id}/permissions?supportsAllDrives=true',
+        headers=perm_headers,
+        json=perm_body
+    )
+    
+    # スプレッドシート用直リンクURL
+    return f"https://drive.google.com/uc?export=view&id={file_id}"
 
+# アプリ起動時の初期化
 try:
-    gc = get_gspread_client()
+    creds = get_credentials()
+    gc = gspread.authorize(creds)
     sh = gc.open_by_key(SPREADSHEET_KEY)
     contract_sheet = sh.worksheet("契約データ")
     target_sheet = sh.worksheet("ミスユーズ(神戸)")
 except Exception as e:
-    st.error(f"スプレッドシート接続エラー: {e}")
+    st.error(f"接続エラー: {e}")
     st.stop()
 
 # --- session_state (状態保持) の初期化 ---
@@ -180,9 +222,8 @@ if st.session_state.search_results is not None:
                     photo_val = "写真なし"
                     if uploaded_photo is not None:
                         try:
-                            # 画像をアップロードして直接表示可能なURLを取得
-                            photo_url = upload_photo_to_imgur(uploaded_photo)
-                            # スプレッドシート内で直接画像表示させる数式
+                            # Google Driveフォルダへ保存
+                            photo_url = upload_photo_to_google_drive(creds, uploaded_photo, DRIVE_FOLDER_ID)
                             photo_val = f'=IMAGE("{photo_url}")'
                         except Exception as upload_err:
                             st.error(f"写真の保存に失敗しました: {upload_err}")
@@ -198,12 +239,11 @@ if st.session_state.search_results is not None:
                             branch_name,     # E列: 加盟店名
                             prod,            # F列: 商品記号
                             final_category,  # G列: 区分
-                            photo_val        # H列: 写真 (=IMAGE("URL") で表示)
+                            photo_val        # H列: 写真
                         ]
                         new_rows.append(row)
                     
-                    # スプレッドシートに追記 (=IMAGE数式を評価)
                     target_sheet.append_rows(new_rows, value_input_option="USER_ENTERED")
                     
-                    st.success(f"🎉 正常に保存されました！（スプレッドシートに写真が表示されます）")
+                    st.success(f"🎉 正常に保存されました！（指定のGoogleドライブに画像が格納され、シートに画像が表示されます）")
                     st.balloons()

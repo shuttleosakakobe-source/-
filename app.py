@@ -13,7 +13,7 @@ st.title("📋 ミスユーズ登録アプリ")
 # --- Google 設定 ---
 SPREADSHEET_KEY = "1A3_0mGiO1FRz4cVHjpxzd66jFKDcyJ-oUPCH3OtSooE"
 
-# 共有いただいたGoogleドライブのフォルダID
+# 指定されたGoogleドライブのフォルダID
 DRIVE_FOLDER_ID = "1eg4vR-8v0qNpWKjEYvQ-2IDMK9O52DhU" 
 
 SCOPES = [
@@ -53,19 +53,25 @@ def upload_photo_to_drive(drive_service, uploaded_file, folder_id):
         resumable=True
     )
     
+    # supportsAllDrives=True を追加して共有フォルダ/ドライブへのアップロードエラーを防止
     file = drive_service.files().create(
         body=file_metadata,
         media_body=media,
-        fields='id, webViewLink'
+        fields='id, webViewLink',
+        supportsAllDrives=True
     ).execute()
     
     file_id = file.get('id')
     
-    # スプレッドシートの =IMAGE 関数で表示できるようにリンク閲覧権限を付与
-    drive_service.permissions().create(
-        fileId=file_id,
-        body={'type': 'anyone', 'role': 'reader'}
-    ).execute()
+    # 閲覧権限の付与（＝IMAGE関数でスプレッドシート上に読み込ませるため）
+    try:
+        drive_service.permissions().create(
+            fileId=file_id,
+            body={'type': 'anyone', 'role': 'reader'},
+            supportsAllDrives=True
+        ).execute()
+    except Exception:
+        pass
     
     # 画像の直リンクURLを返却
     direct_url = f"https://drive.google.com/uc?export=view&id={file_id}"
@@ -201,7 +207,7 @@ if st.session_state.search_results is not None:
                             # スプレッドシート内で画像表示させる数式
                             photo_val = f'=IMAGE("{photo_url}")'
                         except Exception as upload_err:
-                            st.error(f"写真のアップロードに失敗しました。フォルダの共有設定を確認してください: {upload_err}")
+                            st.error(f"写真のアップロードに失敗しました: {upload_err}")
                             photo_val = "アップロード失敗"
                     
                     new_rows = []
@@ -218,8 +224,8 @@ if st.session_state.search_results is not None:
                         ]
                         new_rows.append(row)
                     
-                    # 数式（=IMAGE）をそのまま評価させるオプションを指定
+                    # 数式（=IMAGE）を評価させるため USER_ENTERED を指定
                     target_sheet.append_rows(new_rows, value_input_option="USER_ENTERED")
                     
-                    st.success(f"🎉 正常に保存されました！（指定ドライブに保存＆スプレッドシートに反映完了）")
+                    st.success(f"🎉 正常に保存されました！")
                     st.balloons()

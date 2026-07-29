@@ -8,8 +8,19 @@ from datetime import datetime
 st.set_page_config(page_title="ミスユーズ登録アプリ", layout="centered")
 st.title("📋 ミスユーズ登録アプリ")
 
-# --- Google 設定 ---
+# --- Google スプレッドシート設定 ---
 SPREADSHEET_KEY = "1A3_0mGiO1FRz4cVHjpxzd66jFKDcyJ-oUPCH3OtSooE"
+
+# 拠点と読み込み対象シートのマップ
+BRANCH_SHEET_MAP = {
+    "大阪中央店": "契約データ（大阪中央）",
+    "大阪北店": "契約データ（北店）",
+    "神戸中央店": "顧客データ(神戸)",
+    "京都中央店": "契約データ（京都）"
+}
+
+# 保存先シート
+TARGET_SHEET_NAME = "ミスユーズ顧客"
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -33,7 +44,6 @@ def get_credentials():
 def upload_photo_external(uploaded_file):
     """外部フリーストレージ(freeimage.host API)へ画像を保存して直リンクURLを取得"""
     url = "https://freeimage.host/api/1/upload"
-    # freeimage.host パブリックAPIキー
     params = {
         "key": "6d207e02198a847aa98d0a2a901485a5",
         "action": "upload",
@@ -58,10 +68,9 @@ try:
     creds = get_credentials()
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(SPREADSHEET_KEY)
-    contract_sheet = sh.worksheet("契約データ")
-    target_sheet = sh.worksheet("ミスユーズ(神戸)")
+    target_sheet = sh.worksheet(TARGET_SHEET_NAME)
 except Exception as e:
-    st.error(f"接続エラー: {e}")
+    st.error(f"スプレッドシート接続エラー: {e}")
     st.stop()
 
 # --- session_state (状態保持) の初期化 ---
@@ -71,9 +80,17 @@ if "searched_code" not in st.session_state:
     st.session_state.searched_code = ""
 
 # ==========================================
-# STEP 1: 顧客コード検索
+# STEP 1: 拠点選択 ＆ 顧客コード検索
 # ==========================================
-st.subheader("1. 顧客コード検索")
+st.subheader("1. 拠点選択 ＆ 顧客コード検索")
+
+# 拠点選択（ボタン風ラジオボタン）
+selected_branch = st.radio(
+    "拠点を選択してください",
+    options=["大阪中央店", "大阪北店", "神戸中央店", "京都中央店"],
+    horizontal=True
+)
+
 col_input, col_btn = st.columns([3, 1])
 
 with col_input:
@@ -91,30 +108,37 @@ if search_clicked and input_code.strip():
     raw_input = input_code.strip()
     target_code_clean = raw_input.lstrip("0") if raw_input.lstrip("0") else "0"
     
-    with st.spinner("「契約データ」シートを検索中..."):
-        all_rows = contract_sheet.get_all_values()
-        
-        if len(all_rows) > 1:
-            header = all_rows[0]
-            data_rows = all_rows[1:]
+    # 選択された拠点に対応するシート名を取得
+    sheet_name = BRANCH_SHEET_MAP.get(selected_branch)
+    
+    try:
+        contract_sheet = sh.worksheet(sheet_name)
+        with st.spinner(f"「{sheet_name}」シートを検索中..."):
+            all_rows = contract_sheet.get_all_values()
             
-            matches = []
-            for row in data_rows:
-                if len(row) >= 5:
-                    row_code = str(row[0]).strip()
-                    row_code_clean = row_code.lstrip("0") if row_code.lstrip("0") else "0"
-                    
-                    if row_code_clean == target_code_clean:
-                        matches.append({
-                            "code": row[0].strip(),
-                            "name": row[1].strip(),
-                            "branch_code": row[2].strip(),
-                            "branch_name": row[3].strip(),
-                            "product_code": row[4].strip()
-                        })
-            
-            st.session_state.search_results = matches
-            st.session_state.searched_code = raw_input
+            if len(all_rows) > 1:
+                header = all_rows[0]
+                data_rows = all_rows[1:]
+                
+                matches = []
+                for row in data_rows:
+                    if len(row) >= 5:
+                        row_code = str(row[0]).strip()
+                        row_code_clean = row_code.lstrip("0") if row_code.lstrip("0") else "0"
+                        
+                        if row_code_clean == target_code_clean:
+                            matches.append({
+                                "code": row[0].strip(),
+                                "name": row[1].strip(),
+                                "branch_code": row[2].strip(),
+                                "branch_name": row[3].strip(),
+                                "product_code": row[4].strip()
+                            })
+                
+                st.session_state.search_results = matches
+                st.session_state.searched_code = raw_input
+    except Exception as search_err:
+        st.error(f"「{sheet_name}」シートの読み込みに失敗しました: {search_err}")
 
 st.divider()
 
@@ -125,9 +149,9 @@ if st.session_state.search_results is not None:
     results = st.session_state.search_results
     
     if not results:
-        st.warning(f"顧客コード「{st.session_state.searched_code}」に一致する契約データが見つかりませんでした。")
+        st.warning(f"拠点「{selected_branch}」のデータから顧客コード「{st.session_state.searched_code}」に一致する契約データが見つかりませんでした。")
     else:
-        st.success(f"✅ {len(results)} 件の契約データが見つかりました！")
+        st.success(f"✅ {len(results)} 件の契約データが見つかりました！（検索対象: {selected_branch}）")
         
         customer_code = results[0]["code"]
         customer_name = results[0]["name"]
@@ -139,9 +163,9 @@ if st.session_state.search_results is not None:
         st.markdown("##### 📌 顧客・加盟店情報")
         col_a, col_b = st.columns(2)
         with col_a:
-            st.info(f"**顧客コード**: {customer_code}\n\n**顧客名**: {customer_name}")
+            st.info(f"**拠点**: {selected_branch}\n\n**顧客コード**: {customer_code}\n\n**顧客名**: {customer_name}")
         with col_b:
-            st.info(f"**加盟店コード**: {branch_code}\n\n**加盟店名**: {branch_name}")
+            st.info(f"**加盟店コード**: {branch_code}\n\n**担当者加盟店名**: {branch_name}")
 
         st.subheader("2. 詳細入力")
         with st.form("data_entry_form", clear_on_submit=False):
@@ -165,7 +189,7 @@ if st.session_state.search_results is not None:
                 st.image(uploaded_photo, caption="添付画像プレビュー", width=200)
 
             st.write("")
-            submit_button = st.form_submit_button("🚀 「ミスユーズ(神戸)」シートに送信・保存", use_container_width=True)
+            submit_button = st.form_submit_button(f"🚀 「{TARGET_SHEET_NAME}」シートに送信・保存", use_container_width=True)
 
         if submit_button:
             if not selected_products:
@@ -180,7 +204,6 @@ if st.session_state.search_results is not None:
                     photo_val = "写真なし"
                     if uploaded_photo is not None:
                         try:
-                            # 外部ストレージAPIへ保存して画像直リンクURLを取得
                             photo_url = upload_photo_external(uploaded_photo)
                             photo_val = f'=IMAGE("{photo_url}")'
                         except Exception as upload_err:
@@ -190,18 +213,19 @@ if st.session_state.search_results is not None:
                     new_rows = []
                     for prod in selected_products:
                         row = [
-                            timestamp,       # A列: タイムスタンプ
-                            customer_code,   # B列: 顧客コード
-                            customer_name,   # C列: 顧客名
-                            branch_code,     # D列: 加盟店コード
-                            branch_name,     # E列: 加盟店名
-                            prod,            # F列: 商品記号
-                            final_category,  # G列: 区分
-                            photo_val        # H列: 写真
+                            timestamp,       # A列: 日時
+                            selected_branch, # B列: 拠点
+                            customer_code,   # C列: 顧客コード
+                            customer_name,   # D列: 顧客名
+                            branch_code,     # E列: 加盟店コード
+                            branch_name,     # F列: 担当者加盟店名
+                            prod,            # G列: 商品記号
+                            final_category,  # H列: 区分
+                            photo_val        # I列: 写真
                         ]
                         new_rows.append(row)
                     
                     target_sheet.append_rows(new_rows, value_input_option="USER_ENTERED")
                     
-                    st.success(f"🎉 正常に保存されました！（スプレッドシートのH列に画像が表示されます）")
+                    st.success(f"🎉 正常に保存されました！（「{TARGET_SHEET_NAME}」シートに追記完了）")
                     st.balloons()

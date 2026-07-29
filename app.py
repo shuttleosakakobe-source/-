@@ -8,18 +8,19 @@ from datetime import datetime
 st.set_page_config(page_title="ミスユーズ登録アプリ", layout="centered")
 st.title("📋 ミスユーズ登録アプリ")
 
-# --- Google スプレッドシート設定 ---
-SPREADSHEET_KEY = "1A3_0mGiO1FRz4cVHjpxzd66jFKDcyJ-oUPCH3OtSooE"
+# --- 設定値の読み込み (st.secrets 推奨) ---
+SPREADSHEET_KEY = st.secrets.get("SPREADSHEET_KEY", "1A3_0mGiO1FRz4cVHjpxzd66jFKDcyJ-oUPCH3OtSooE")
+FREEIMAGE_API_KEY = st.secrets.get("FREEIMAGE_API_KEY", "6d207e02198a847aa98d0a2a901485a5")
 
-# 拠点と読み込み対象シートのマップ
-BRANCH_SHEET_MAP = {
-    "大阪中央店": "契約データ（大阪中央）",
-    "大阪北店": "契約データ（北店）",
-    "神戸中央店": "顧客データ(神戸)",
-    "京都中央店": "契約データ（京都）"
+# 拠点と読み込み対象シートの gid (シートID) のマップ
+BRANCH_GID_MAP = {
+    "大阪中央店": 2139697515,
+    "大阪北店": 980545892,
+    "神戸中央店": 1915989752,
+    "京都中央店": 574516095
 }
 
-# 保存先シート
+# 保存先シート名
 TARGET_SHEET_NAME = "ミスユーズ顧客"
 
 SCOPES = [
@@ -45,7 +46,7 @@ def upload_photo_external(uploaded_file):
     """外部フリーストレージ(freeimage.host API)へ画像を保存して直リンクURLを取得"""
     url = "https://freeimage.host/api/1/upload"
     params = {
-        "key": "6d207e02198a847aa98d0a2a901485a5",
+        "key": FREEIMAGE_API_KEY,
         "action": "upload",
         "format": "json"
     }
@@ -53,11 +54,13 @@ def upload_photo_external(uploaded_file):
         "source": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)
     }
     
-    response = requests.post(url, data=params, files=files)
+    response = requests.post(url, data=params, files=files, timeout=15)
     if response.status_code == 200:
         res_data = response.json()
         if res_data.get("status_code") == 200:
-            return res_data["image"]["url"]
+            image_info = res_data.get("image", {})
+            direct_url = image_info.get("file", {}).get("url") or image_info.get("display_url") or image_info.get("url")
+            return direct_url
         else:
             raise Exception(f"アップロード応答エラー: {res_data}")
     else:
@@ -84,7 +87,6 @@ if "searched_code" not in st.session_state:
 # ==========================================
 st.subheader("1. 拠点選択 ＆ 顧客コード検索")
 
-# 拠点選択（ボタン風ラジオボタン）
 selected_branch = st.radio(
     "拠点を選択してください",
     options=["大阪中央店", "大阪北店", "神戸中央店", "京都中央店"],
@@ -108,16 +110,17 @@ if search_clicked and input_code.strip():
     raw_input = input_code.strip()
     target_code_clean = raw_input.lstrip("0") if raw_input.lstrip("0") else "0"
     
-    # 選択された拠点に対応するシート名を取得
-    sheet_name = BRANCH_SHEET_MAP.get(selected_branch)
+    # 選択された拠点の gid を取得
+    target_gid = BRANCH_GID_MAP.get(selected_branch)
     
     try:
-        contract_sheet = sh.worksheet(sheet_name)
-        with st.spinner(f"「{sheet_name}」シートを検索中..."):
+        # gid 指定でワークシートを取得
+        contract_sheet = sh.get_worksheet_by_id(target_gid)
+        
+        with st.spinner(f"「{selected_branch}」の契約データを検索中..."):
             all_rows = contract_sheet.get_all_values()
             
             if len(all_rows) > 1:
-                header = all_rows[0]
                 data_rows = all_rows[1:]
                 
                 matches = []
@@ -138,7 +141,7 @@ if search_clicked and input_code.strip():
                 st.session_state.search_results = matches
                 st.session_state.searched_code = raw_input
     except Exception as search_err:
-        st.error(f"「{sheet_name}」シートの読み込みに失敗しました: {search_err}")
+        st.error(f"「{selected_branch}」シートの読み込みに失敗しました: {search_err}")
 
 st.divider()
 
@@ -168,7 +171,7 @@ if st.session_state.search_results is not None:
             st.info(f"**加盟店コード**: {branch_code}\n\n**担当者加盟店名**: {branch_name}")
 
         st.subheader("2. 詳細入力")
-        with st.form("data_entry_form", clear_on_submit=False):
+        with st.form("data_entry_form", clear_on_submit=True):
             
             selected_products = st.multiselect(
                 "対象の商品記号を選択してください",
@@ -200,7 +203,6 @@ if st.session_state.search_results is not None:
                 with st.spinner("写真のアップロードと保存処理中..."):
                     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     
-                    # 画像アップロード処理
                     photo_val = "写真なし"
                     if uploaded_photo is not None:
                         try:
@@ -225,7 +227,9 @@ if st.session_state.search_results is not None:
                         ]
                         new_rows.append(row)
                     
-                    target_sheet.append_rows(new_rows, value_input_option="USER_ENTERED")
-                    
-                    st.success(f"🎉 正常に保存されました！（「{TARGET_SHEET_NAME}」シートに追記完了）")
-                    st.balloons()
+                    try:
+                        target_sheet.append_rows(new_rows, value_input_option="USER_ENTERED")
+                        st.success(f"🎉 正常に保存されました！（「{TARGET_SHEET_NAME}」シートに追記完了）")
+                        st.balloons()
+                    except Exception as append_err:
+                        st.error(f"スプレッドシートへの追記に失敗しました: {append_err}")

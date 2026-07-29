@@ -8,16 +8,16 @@ from datetime import datetime
 st.set_page_config(page_title="ミスユーズ登録アプリ", layout="centered")
 st.title("📋 ミスユーズ登録アプリ")
 
-# --- 設定値の読み込み (st.secrets 推奨) ---
+# --- 設定値の読み込み ---
 SPREADSHEET_KEY = st.secrets.get("SPREADSHEET_KEY", "1A3_0mGiO1FRz4cVHjpxzd66jFKDcyJ-oUPCH3OtSooE")
 FREEIMAGE_API_KEY = st.secrets.get("FREEIMAGE_API_KEY", "6d207e02198a847aa98d0a2a901485a5")
 
-# 拠点と読み込み対象シートの gid (シートID) のマップ
-BRANCH_GID_MAP = {
-    "大阪中央店": 2139697515,
-    "大阪北店": 980545892,
-    "神戸中央店": 1915989752,
-    "京都中央店": 574516095
+# 各拠点と「シート名（タブ名）」および「gid（フォールバック用）」のマップ
+BRANCH_CONFIG = {
+    "大阪中央店": {"sheet_name": "契約データ（大阪中央）", "gid": 2139697515},
+    "大阪北店":   {"sheet_name": "契約データ（北店）",     "gid": 980545892},
+    "神戸中央店": {"sheet_name": "顧客データ(神戸)",     "gid": 1915989752},
+    "京都中央店": {"sheet_name": "契約データ（京都）",     "gid": 574516095}
 }
 
 # 保存先シート名
@@ -36,7 +36,7 @@ def get_credentials():
         pk = pk.replace("\\n", "\n")
         if "-----BEGIN PRIVATE KEY-----" in pk and "\n" not in pk:
             pk = pk.replace("-----BEGIN PRIVATE KEY-----", "-----BEGIN PRIVATE KEY-----\n")
-            pk = pk.replace("-----END PRIVATE KEY-----", "\n-----END PRIVATE KEY-----")
+            pk = pk.replace("-----END PRIVATE KEY-----", "\n-----END PRIVATE KEY-----\n")
         creds_dict["private_key"] = pk
 
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
@@ -66,17 +66,24 @@ def upload_photo_external(uploaded_file):
     else:
         raise Exception(f"HTTPエラー: {response.status_code} - {response.text}")
 
-# 初期化処理
+# スプレッドシート初期接続
 try:
     creds = get_credentials()
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(SPREADSHEET_KEY)
-    target_sheet = sh.worksheet(TARGET_SHEET_NAME)
+    
+    # 保存先シートの存在確認・取得
+    try:
+        target_sheet = sh.worksheet(TARGET_SHEET_NAME)
+    except Exception:
+        # 見つからない場合は新規作成
+        target_sheet = sh.add_worksheet(title=TARGET_SHEET_NAME, rows="1000", cols="10")
+        target_sheet.append_row(["日時", "拠点", "顧客コード", "顧客名", "加盟店コード", "担当者加盟店名", "商品記号", "区分", "写真"])
 except Exception as e:
     st.error(f"スプレッドシート接続エラー: {e}")
     st.stop()
 
-# --- session_state (状態保持) の初期化 ---
+# --- session_state の初期化 ---
 if "search_results" not in st.session_state:
     st.session_state.search_results = None
 if "searched_code" not in st.session_state:
@@ -108,40 +115,75 @@ with col_btn:
 
 if search_clicked and input_code.strip():
     raw_input = input_code.strip()
+    # 先頭のゼロを除去して数値を比較できるように準備
     target_code_clean = raw_input.lstrip("0") if raw_input.lstrip("0") else "0"
     
-    # 選択された拠点の gid を取得
-    target_gid = BRANCH_GID_MAP.get(selected_branch)
+    config = BRANCH_CONFIG.get(selected_branch)
+    target_sheet_name = config["sheet_name"]
+    target_gid = config["gid"]
     
+    contract_sheet = None
+    
+    # 確実にシートを取得（①シート名優先 -> ②gidフォールバック）
     try:
-        # gid 指定でワークシートを取得
-        contract_sheet = sh.get_worksheet_by_id(target_gid)
-        
-        with st.spinner(f"「{selected_branch}」の契約データを検索中..."):
-            all_rows = contract_sheet.get_all_values()
-            
-            if len(all_rows) > 1:
-                data_rows = all_rows[1:]
+        contract_sheet = sh.worksheet(target_sheet_name)
+    except Exception:
+        try:
+            contract_sheet = sh.get_worksheet_by_id(target_gid)
+        except Exception as err:
+            st.error(f"「{selected_branch}」のシートを開くことができませんでした: {err}")
+            contract_sheet = None
+
+    if contract_sheet is not None:
+        with st.spinner(f"「{selected_branch}」のシート（{contract_sheet.title}）を読み込み中..."):
+            try:
+                all_rows = contract_sheet.get_all_values()
                 
-                matches = []
-                for row in data_rows:
-                    if len(row) >= 5:
-                        row_code = str(row[0]).strip()
-                        row_code_clean = row_code.lstrip("0") if row_code.lstrip("0") else "0"
-                        
-                        if row_code_clean == target_code_clean:
-                            matches.append({
-                                "code": row[0].strip(),
-                                "name": row[1].strip(),
-                                "branch_code": row[2].strip(),
-                                "branch_name": row[3].strip(),
-                                "product_code": row[4].strip()
-                            })
-                
-                st.session_state.search_results = matches
-                st.session_state.searched_code = raw_input
-    except Exception as search_err:
-        st.error(f"「{selected_branch}」シートの読み込みに失敗しました: {search_err}")
+                if len(all_rows) > 1:
+                    header = [str(cell).strip() for cell in all_rows[0]]
+                    data_rows = all_rows[1:]
+                    
+                    # 動的な列位置の探知（列名が変わっても対応できるようにする）
+                    idx_code = 0
+                    idx_name = 1 if len(header) > 1 else 0
+                    idx_bcode = 2 if len(header) > 2 else 0
+                    idx_bname = 3 if len(header) > 3 else 0
+                    idx_pcode = 4 if len(header) > 4 else 0
+                    
+                    # ヘッダー名から列のインデックスを自動検索（存在する場合）
+                    for i, col in enumerate(header):
+                        if "顧客コード" in col or "コード" in col and i < 2:
+                            idx_code = i
+                        elif "顧客名" in col or "氏名" in col or "名" in col:
+                            idx_name = i
+                        elif "加盟店コード" in col:
+                            idx_bcode = i
+                        elif "加盟店名" in col:
+                            idx_bname = i
+                        elif "商品" in col or "記号" in col:
+                            idx_pcode = i
+
+                    matches = []
+                    for row in data_rows:
+                        if len(row) > idx_code:
+                            row_code = str(row[idx_code]).strip()
+                            row_code_clean = row_code.lstrip("0") if row_code.lstrip("0") else "0"
+                            
+                            if row_code_clean == target_code_clean:
+                                matches.append({
+                                    "code": row_code,
+                                    "name": str(row[idx_name]).strip() if len(row) > idx_name else "",
+                                    "branch_code": str(row[idx_bcode]).strip() if len(row) > idx_bcode else "",
+                                    "branch_name": str(row[idx_bname]).strip() if len(row) > idx_bname else "",
+                                    "product_code": str(row[idx_pcode]).strip() if len(row) > idx_pcode else ""
+                                })
+                    
+                    st.session_state.search_results = matches
+                    st.session_state.searched_code = raw_input
+                else:
+                    st.warning("シートにデータ行が存在しません。")
+            except Exception as search_err:
+                st.error(f"データの検索中にエラーが発生しました: {search_err}")
 
 st.divider()
 
@@ -152,7 +194,7 @@ if st.session_state.search_results is not None:
     results = st.session_state.search_results
     
     if not results:
-        st.warning(f"拠点「{selected_branch}」のデータから顧客コード「{st.session_state.searched_code}」に一致する契約データが見つかりませんでした。")
+        st.warning(f"拠点「{selected_branch}」から顧客コード「{st.session_state.searched_code}」に一致するデータが見つかりませんでした。")
     else:
         st.success(f"✅ {len(results)} 件の契約データが見つかりました！（検索対象: {selected_branch}）")
         
@@ -171,7 +213,7 @@ if st.session_state.search_results is not None:
             st.info(f"**加盟店コード**: {branch_code}\n\n**担当者加盟店名**: {branch_name}")
 
         st.subheader("2. 詳細入力")
-        with st.form("data_entry_form", clear_on_submit=True):
+        with st.form("data_entry_form", clear_on_submit=False):
             
             selected_products = st.multiselect(
                 "対象の商品記号を選択してください",

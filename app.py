@@ -3,6 +3,9 @@ import gspread
 from google.oauth2.service_account import Credentials
 import requests
 from datetime import datetime
+import io
+from PIL import Image
+import base64
 
 # --- ページ基本設定 ---
 st.set_page_config(page_title="ミスユーズ登録アプリ", layout="centered")
@@ -12,7 +15,6 @@ st.title("📋 ミスユーズ登録アプリ")
 SPREADSHEET_KEY = st.secrets.get("SPREADSHEET_KEY", "1A3_0mGiO1FRz4cVHjpxzd66jFKDcyJ-oUPCH3OtSooE")
 FREEIMAGE_API_KEY = st.secrets.get("FREEIMAGE_API_KEY", "6d207e02198a847aa98d0a2a901485a5")
 
-# ご提示いただいた正しい URL (gid) のマッピング
 BRANCH_CONFIG = {
     "神戸中央店": {"gid": 0},
     "京都中央店": {"gid": 574516095},
@@ -20,7 +22,6 @@ BRANCH_CONFIG = {
     "大阪中央店": {"gid": 2139697515}
 }
 
-# 保存先シート名
 TARGET_SHEET_NAME = "ミスユーズ顧客"
 
 SCOPES = [
@@ -42,29 +43,66 @@ def get_credentials():
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     return creds
 
-def upload_photo_external(uploaded_file):
-    """外部フリーストレージ(freeimage.host API)へ画像を保存して直リンクURLを取得"""
-    url = "https://freeimage.host/api/1/upload"
-    params = {
-        "key": FREEIMAGE_API_KEY,
-        "action": "upload",
-        "format": "json"
-    }
-    files = {
-        "source": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)
-    }
+def compress_image(uploaded_file, max_size=(1200, 1200), quality=80):
+    """画像をリサイズ・圧縮して容量を軽くする関数"""
+    image = Image.open(uploaded_file)
+    # EXIFの回転情報を反映（スマホ写真の向き修正）
+    try:
+        from PIL import ImageOps
+        image = ImageOps.exif_transpose(image)
+    except Exception:
+        pass
+
+    # RGBに変換（PNG/RGBAの透明度の問題を回避）
+    if image.mode != "RGB":
+        image = image.convert("RGB")
     
-    response = requests.post(url, data=params, files=files, timeout=15)
-    if response.status_code == 200:
-        res_data = response.json()
-        if res_data.get("status_code") == 200:
-            image_info = res_data.get("image", {})
-            direct_url = image_info.get("file", {}).get("url") or image_info.get("display_url") or image_info.get("url")
-            return direct_url
+    # 縮小リサイズ
+    image.thumbnail(max_size, Image.Resampling.LANCZOS)
+    
+    # バイトストリームへ保存
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=quality)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+def upload_photo_external(uploaded_file):
+    """画像圧縮＆base64化を行い、freeimage.hostへアップロード"""
+    try:
+        # 1. 画像圧縮処理
+        compressed_bytes = compress_image(uploaded_file)
+        b64_image = base64.b64encode(compressed_bytes).decode("utf-8")
+        
+        # 2. APIリクエスト設定
+        url = "https://freeimage.host/api/1/upload"
+        payload = {
+            "key": FREEIMAGE_API_KEY,
+            "action": "upload",
+            "source": b64_image,
+            "format": "json"
+        }
+        
+        # 3. アップロード実行 (タイムアウト30秒に拡張)
+        response = requests.post(url, data=payload, timeout=30)
+        
+        if response.status_code == 200:
+            res_data = response.json()
+            if res_data.get("status_code") == 200 or res_data.get("status") == 200:
+                image_info = res_data.get("image", {})
+                direct_url = image_info.get("file", {}).get("url") or image_info.get("display_url") or image_info.get("url")
+                
+                if direct_url:
+                    return direct_url
+                else:
+                    raise Exception(f"レスポンス内に画像URLが見つかりません: {res_data}")
+            else:
+                error_msg = res_data.get("error", {}).get("message", "不明なAPIエラー")
+                raise Exception(f"APIエラー応答: {error_msg}")
         else:
-            raise Exception(f"アップロード応答エラー: {res_data}")
-    else:
-        raise Exception(f"HTTPエラー: {response.status_code} - {response.text}")
+            raise Exception(f"HTTPエラー {response.status_code}: {response.text[:200]}")
+            
+    except Exception as e:
+        raise Exception(f"アップロード処理失敗: {str(e)}")
 
 # スプレッドシート初期接続
 try:
@@ -72,18 +110,16 @@ try:
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(SPREADSHEET_KEY)
     
-    # 保存先シートの存在確認・取得
     try:
         target_sheet = sh.worksheet(TARGET_SHEET_NAME)
     except Exception:
-        # 見つからない場合は新規作成
         target_sheet = sh.add_worksheet(title=TARGET_SHEET_NAME, rows="1000", cols="10")
         target_sheet.append_row(["日時", "拠点", "顧客コード", "顧客名", "加盟店コード", "担当者加盟店名", "商品記号", "区分", "写真"])
 except Exception as e:
     st.error(f"スプレッドシート接続エラー: {e}")
     st.stop()
 
-# --- session_state の初期化 ---
+# session_state 初期化
 if "search_results" not in st.session_state:
     st.session_state.search_results = None
 if "searched_code" not in st.session_state:
@@ -115,15 +151,12 @@ with col_btn:
 
 if search_clicked and input_code.strip():
     raw_input = input_code.strip()
-    # 先頭のゼロを除去して文字列・数値の表記揺れを補正
     target_code_clean = raw_input.lstrip("0") if raw_input.lstrip("0") else "0"
     
     config = BRANCH_CONFIG.get(selected_branch)
     target_gid = config["gid"]
     
     contract_sheet = None
-    
-    # gid を使用して直接正確なワークシートを取得
     try:
         contract_sheet = sh.get_worksheet_by_id(target_gid)
     except Exception as err:
@@ -139,14 +172,7 @@ if search_clicked and input_code.strip():
                     header = [str(cell).strip() for cell in all_rows[0]]
                     data_rows = all_rows[1:]
                     
-                    # 各店舗のヘッダーの位置を自動検索（標準の位置をデフォルトに設定）
-                    idx_code = 0
-                    idx_name = 1 if len(header) > 1 else 0
-                    idx_bcode = 2 if len(header) > 2 else 0
-                    idx_bname = 3 if len(header) > 3 else 0
-                    idx_pcode = 4 if len(header) > 4 else 0
-                    
-                    # 列名が含まれているか判定してインデックスを自動調整
+                    idx_code, idx_name, idx_bcode, idx_bname, idx_pcode = 0, 1, 2, 3, 4
                     for i, col in enumerate(header):
                         if "顧客コード" in col or ("コード" in col and i < 2):
                             idx_code = i
@@ -238,16 +264,17 @@ if st.session_state.search_results is not None:
             else:
                 final_category = f"その他（{other_text}）" if category_option == "その他" and other_text else category_option
                 
-                with st.spinner("写真のアップロードと保存処理中..."):
+                with st.spinner("画像の圧縮とスプレッドシートへの保存処理中..."):
                     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     
                     photo_val = "写真なし"
                     if uploaded_photo is not None:
                         try:
                             photo_url = upload_photo_external(uploaded_photo)
+                            # スプレッドシートの関数として埋め込み
                             photo_val = f'=IMAGE("{photo_url}")'
                         except Exception as upload_err:
-                            st.error(f"写真の保存に失敗しました: {upload_err}")
+                            st.error(f"⚠️ 写真の保存に失敗しました: {upload_err}")
                             photo_val = "アップロード失敗"
                     
                     new_rows = []
